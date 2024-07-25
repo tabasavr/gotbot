@@ -6,6 +6,7 @@ import cfg from "../config";
 import * as _ from "underscore";
 import STTApiLite from "./modules/STTApiLite/lib/STTApiLite";
 const fleets = require('./fleetdb');
+import Set from "core-js-pure/stable/set"
 
 export interface BossCmdFlags {
   node?: number
@@ -144,7 +145,69 @@ function reportBossSummary(strs: string[], level: BossData, possibleTraits: stri
 function computeBossSolution(level: BossData, possibleTraits: string[], excludeChar: string[], flags: BossCmdFlags) {
   const difficultToMaxStars = [0, 2, 3, 4, 4, 5, 5]
   const myMaxStars = difficultToMaxStars[level.difficulty_id]
-  let allCrew = chars.allCrewEntries().filter((c: CharInfo) => c.stars <= myMaxStars)
+  let allCrew: CharInfo[] = chars.allCrewEntries().filter((c: CharInfo) => c.stars <= myMaxStars)
+
+  let nodeSolutions: { requiredTraits: Set<string>, totalTraits: number }[] = level.nodes.map(node => {
+    let total = node.open_traits.length + node.hidden_traits.length
+    if (node.unlocked_character) {
+      return {
+        requiredTraits: new Set(node.open_traits.concat(node.hidden_traits)),
+        totalTraits: total
+      }
+    } else {
+      return {
+        requiredTraits: new Set(node.open_traits),
+        totalTraits: total
+      }
+    }
+  })
+
+  while (true) {
+    let unassignedTraits = possibleTraits
+    nodeSolutions.forEach(node => {
+      node.requiredTraits.forEach((trait: string) => {
+        let idx = unassignedTraits.indexOf(trait)
+        unassignedTraits.splice(idx, 1)
+      })
+    })
+
+    let nodeRequiredTraits = nodeSolutions.map(node => {
+      let nodePossibleTraits: Set<string> = node.requiredTraits.union(new Set(unassignedTraits))
+      let candidates = allCrew.filter(crew => {
+        let crewTraits = new Set(crew.traits_int)
+        // crew is a candidate if it has all required traits and enought traits from (required + unassigned)
+        return node.requiredTraits.isSubsetOf(crewTraits) && nodePossibleTraits.intersection(crewTraits).size >= node.totalTraits
+      })
+      return _.reduce(candidates, (acc, crew) => { return acc.intersection(new Set(crew.traits_int)) }, nodePossibleTraits)
+    })
+
+    let changed = false
+    nodeSolutions.forEach((node, idx) => {
+      if (node.requiredTraits.symmetricDifference(nodeRequiredTraits[idx]).size > 0) {
+        changed = true
+      }
+    })
+
+    if (!changed) {
+      break
+    }
+
+    nodeSolutions = nodeSolutions.map((node, idx) => {
+      return {
+        requiredTraits: nodeRequiredTraits[idx],
+        totalTraits: node.totalTraits
+      }
+    })
+  }
+
+  let unassignedTraits = possibleTraits
+  nodeSolutions.forEach(node => {
+    node.requiredTraits.forEach((trait: string) => {
+      let idx = unassignedTraits.indexOf(trait)
+      unassignedTraits.splice(idx, 1)
+    })
+  })
+
   // allCrew = allCrew.slice(0,10)
   let recs: { reqMatches: number; reqMatchNodes: number[]; name: string; optMatches: number; optMatchNodes: number[], score: number }[] = []
   allCrew.forEach((crew: CharInfo) => {
@@ -157,7 +220,7 @@ function computeBossSolution(level: BossData, possibleTraits: string[], excludeC
     const matchOptTraits: string[] = []
     possibleTraits.forEach((reqTrait: string, idx) => {
       // The second part of the if clause is to cater for dupe opt traits
-      if (traits.includes(reqTrait) && !matchOptTraits.includes(reqTrait)) {
+      if (unassignedTraits.includes(reqTrait) && traits.includes(reqTrait) && !matchOptTraits.includes(reqTrait)) {
         matchOptTraits.push(reqTrait)
         optMatchNodes.push(idx)
         optMatches++
@@ -166,9 +229,9 @@ function computeBossSolution(level: BossData, possibleTraits: string[], excludeC
 
     level.nodes.forEach((node, idx) => {
       // We match the node trait and it is not yet unlocked
-      if ((!node.unlocked_character) && _.all(node.open_traits, t => traits.includes(t))) {
+      if ((!node.unlocked_character) && _.all(nodeSolutions[idx].requiredTraits, t => traits.includes(t))) {
         // Need to have enough optional traits
-        if (optMatches >= node.hidden_traits.length) {
+        if (optMatches + nodeSolutions[idx].requiredTraits.size >= nodeSolutions[idx].totalTraits) {
           reqMatches++
           reqMatchNodes.push(idx)
         }
